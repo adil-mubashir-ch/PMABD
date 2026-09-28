@@ -1,0 +1,337 @@
+# configs/mobilenetv2_tinyimagenet_2bit_ladder.yaml
+# ============================================================
+# MobileNetV2 TinyImageNet-200 — full precision ladder to W2A2
+# VARIANT A: No saturation (single-pass cosine + patience ES)
+#
+# BENCHMARK ALIGNMENT
+#   The setup deliberately matches the two most recent works that report
+#   QAT+KD numbers on TinyImageNet, so their tables can be quoted as-is:
+#     SQAKD  — Zhao & Zhao, AISTATS 2024 (PMLR v238)
+#     DAQAKD — Kur & Zhao, arXiv:2509.03850, 2025
+#   Both upsample the 64x64 images to 224x224 and report on the official 10k
+#   val split. NOTE their FP32 models are trained from RANDOM init (their
+#   mobilenet_v2_fp script passes no --pretrained), while ours are fine-tuned
+#   from ImageNet weights. That alone explains the ~16pt gap, so their
+#   quantized numbers are NOT directly quotable against ours -- see
+#   baselines/README.md. Their full-precision references:
+#     MobileNetV2  58.07 (SQAKD) / 58.64 (DAQAKD)
+#     ResNet-18    65.59 (SQAKD) / 66.87 (DAQAKD)
+#   Their lowest reported MobileNetV2 precision is W3A3 (56.17 DAQAKD,
+#   52.73 SQAKD, 47.77 plain PACT). Nothing published reports MobileNetV2
+#   W2A2 on TinyImageNet — that is what this ladder is for.
+#
+#   NOTE: SQAKD/DAQAKD leave the first conv and last FC at FULL PRECISION.
+#   This pipeline holds them at W8A8 instead, which is strictly harder.
+#   Say so in the paper; it is a point in our favour, not a mismatch to hide.
+#
+# DATA SPLITS (three disjoint sets — no leakage)
+#   train : 90% of the official train split (450 img/class), augmented
+#   val   : 10% of the official train split ( 50 img/class), clean
+#           -> checkpoint selection, early stopping, saturation
+#   test  : the official 10k val split (50 img/class), clean
+#           -> reported only, never influences a decision.
+#              This is the number comparable to published work.
+#
+# PREREQUISITE
+#   torchvision only ships 1000-class heads, so the teachers and the FP32
+#   student initialisation must be fine-tuned on TinyImageNet first:
+#       python pretrain_tinyimagenet.py --config <this file>
+#   That writes M1.pth / M2.pth / M3.pth / mobilenetv2_tin_pretrained.pth
+#   into output_dir. The ladder refuses to start without them.
+#
+# TEACHER HIERARCHY
+#   M1 : ResNet-50 (ImageNet init, fine-tuned on TinyImageNet)
+#   M2 : ResNet-34 (same)
+#   M3 : ResNet-18 (same) — matches the SQAKD/DAQAKD reference arch
+#   Each completed ladder stage is additionally registered into the pool,
+#   so later stages distil from their own higher-precision ancestors.
+#
+# PRECISION LADDER
+#   M3_kd : MobileNetV2 FP32 student — KD from M1+M2+M3 (saved M_fp32.pth)
+#   M4    : W8A8   M5a : W8A4   M5b : W4A4   M6a : W4A3
+#   M6b   : W3A3   M7a : W3A2   M7b : W2A2
+#
+# COST
+#   224x224 with three ResNet teachers is the expensive-but-comparable
+#   setting. If you need a cheaper run: --image_size 128 is ~3x faster
+#   (numbers then are internally consistent but not directly quotable
+#   against SQAKD/DAQAKD), and --epoch_scale 0.25 gives a full end-to-end
+#   shakedown in a few hours.
+# ============================================================
+
+experiment:
+  name: "mobilenetv2_tinyimagenet_2bit_ladder_nosat"
+  dataset: "tinyimagenet"
+  num_classes: 200
+  output_dir: "./outputs/mobilenetv2_tinyimagenet_2bit_ladder_nosat"
+  seed: 42
+  # Register each finished stage into the teacher pool. Every extra teacher
+  # costs one forward pass per batch, so cap the pool to keep the late
+  # stages affordable (0 = unlimited). The three base teachers are never
+  # evicted; the oldest student-teacher is dropped first.
+  register_stage_teachers: true
+  teacher_pool_max: 6
+
+data:
+  batch_size: 32                 # matches SQAKD's TinyImageNet batch size.
+                                 # ResNet-50 fp32 @224 needs ~5-6 GB at bs=32;
+                                 # bs=96 exceeds an 8 GB card and Windows silently
+                                 # spills to system RAM instead of erroring, which
+                                 # costs ~3x throughput. Raise to 96-128 on 24 GB.
+  num_workers: 8
+  data_root: "./data"            # must contain tiny-imagenet-200/
+  val_fraction: 0.10             # carve val out of train — do NOT set to 0
+  val_seed: 42
+  image_size: 224                # matches SQAKD / DAQAKD; 64 uses adapted stems
+
+# ── Backbone fine-tuning (used by pretrain_tinyimagenet.py only) ─────────
+pretrain:
+  epochs: 40
+  # TinyImageNet's 200 classes are a SUBSET of ImageNet-1k, so the torchvision
+  # features are already close to ideal and epoch 1 (effectively a linear probe)
+  # scores very high. lr=0.01 on the backbone then damages those features: with
+  # it, ResNet-50 peaked at epoch 1 (79.9) and spent 10 epochs at 73-74 before
+  # patience fired, and ResNet-34 dipped 65.5 -> 57.7 and needed 20 epochs to
+  # climb back. 0.002 fine-tunes without wrecking the transfer.
+  lr: 0.002                      # backbone; the fresh head gets 10x this
+  weight_decay: 1.0e-4
+  label_smoothing: 0.1
+  warmup_epochs: 2
+  # Long enough to survive an early-epoch dip rather than early-stopping inside
+  # one and keeping a barely-trained checkpoint.
+  patience: 20
+  min_delta: 0.05
+  grad_clip: 5.0
+
+# ── Teacher pool ────────────────────────────────────────────────────────
+teacher:
+  arch: "resnet50"
+  pretrained: true
+  source: "torchvision"
+  checkpoint: "M1.pth"           # produced by pretrain_tinyimagenet.py
+
+aux_teachers:
+  - arch: "resnet34"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M2.pth"
+    register_as: "M2"
+  - arch: "resnet18"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M3.pth"
+    register_as: "M3"
+
+# ── Stage M3_kd: MobileNetV2 FP32 student (KD warm-up) ──────────────────
+stage_m3_kd:
+  name: "M1+M2+M3->MBv2_FP32 (KD warm-up)"
+  arch: "mobilenet_v2"
+  init_from: "pretrained"        # mobilenetv2_tin_pretrained.pth
+  checkpoint: "M_fp32.pth"
+  bitwidth_w: 32
+  bitwidth_a: 32
+  epochs: 30
+  patience: 10
+  min_delta: 0.05
+  lr: 5.0e-5
+  alpha: 0.5
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 2
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 20
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M4: W8A8 ──────────────────────────────────────────────────────
+stage_m4:
+  name: "M1+M2+M3+FP32->M4 (W8A8)"
+  arch: "mobilenet_v2"
+  init_from: "M_fp32.pth"
+  checkpoint: "M4.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 40
+  patience: 12
+  min_delta: 0.05
+  lr: 3.0e-4
+  alpha: 0.55
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.001
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 3
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M5a: W8A4 ─────────────────────────────────────────────────────
+stage_m5a:
+  name: "M4->M5a (W8A4)"
+  arch: "mobilenet_v2"
+  init_from: "M4.pth"
+  checkpoint: "M5a.pth"
+  bitwidth_w: 8
+  bitwidth_a: 4
+  epochs: 35
+  patience: 12
+  min_delta: 0.05
+  lr: 1.5e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.5
+  eta_min_factor: 0.01
+  warmup_epochs: 3
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M5b: W4A4 (final 4-bit model) ─────────────────────────────────
+stage_m5b:
+  name: "M5a->M5b (W4A4)"
+  arch: "mobilenet_v2"
+  init_from: "M5a.pth"
+  checkpoint: "M5.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  epochs: 45
+  patience: 15
+  min_delta: 0.05
+  lr: 1.0e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.4
+  eta_min_factor: 0.02
+  warmup_epochs: 5
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M6a: W4A3 ─────────────────────────────────────────────────────
+stage_m6a:
+  name: "M5b->M6a (W4A3)"
+  arch: "mobilenet_v2"
+  init_from: "M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 4
+  bitwidth_a: 3
+  epochs: 40
+  patience: 15
+  min_delta: 0.05
+  lr: 6.0e-5
+  alpha: 0.7
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.01
+  warmup_epochs: 4
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M6b: W3A3 (final 3-bit model) ─────────────────────────────────
+stage_m6b:
+  name: "M6a->M6b (W3A3)"
+  arch: "mobilenet_v2"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  epochs: 45
+  patience: 15
+  min_delta: 0.05
+  lr: 8.0e-5
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.5
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.02
+  warmup_epochs: 5
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M7a: W3A2 ─────────────────────────────────────────────────────
+stage_m7a:
+  name: "M6b->M7a (W3A2)"
+  arch: "mobilenet_v2"
+  init_from: "M6.pth"
+  checkpoint: "M7a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 45
+  patience: 15
+  min_delta: 0.04
+  lr: 3.0e-5
+  alpha: 0.75
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 6
+  label_smoothing: 0.04
+  use_rkd: false
+  quant_log_every: 5
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M7b: W2A2 (final 2-bit model) ─────────────────────────────────
+stage_m7b:
+  name: "M7a->M7b (W2A2)"
+  arch: "mobilenet_v2"
+  init_from: "M7a.pth"
+  checkpoint: "M7.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  # 60 is a ceiling, not a target: patience below stops the stage early if it
+  # plateaus, and the baselines' matched budget is read from the epochs this
+  # stage ACTUALLY spends, not from this number. A tighter cap was considered
+  # and rejected -- W3A3 needed 45 epochs and W4A3 needed 53, so capping the
+  # hardest rung below those would report a budget limit as if it were the
+  # method's W2A2 ceiling.
+  epochs: 60
+  patience: 20
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 8
+  label_smoothing: 0.03
+  use_rkd: false
+  quant_log_every: 5
+  feat_channels: [32, 64, 96, 320]

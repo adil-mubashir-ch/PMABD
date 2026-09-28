@@ -1,0 +1,127 @@
+# configs/resnet18_cifar100_2bit_fixedact.yaml
+# ============================================================
+# PMABD ResNet-18 W3A2 + W2A2 rungs, retrained with the UNSIGNED activation
+# quantizer (cifar_ladder.py --unsigned-act).
+#
+# WHY THESE TWO RUNGS ARE BEING REDONE
+#   pipeline.LSQQuantizer is symmetric signed, but every quantized conv here is
+#   fed by a ReLU, so half its levels are unreachable. Measured on the original
+#   checkpoints: the W3A2 and W2A2 rungs used 2 of their 4 activation levels,
+#   i.e. binary activations, which is why the ladder fell from 78.62 (W3A3) to
+#   74.37 (W3A2). With the fix the W3A2 student scores 77.4% at initialisation
+#   against 50.3% before it.
+#
+# NOT RETRAINED: M1..M5. They are restored from the original run's checkpoints
+# WITH their signed quantizers, exactly as trained, and only act as teachers
+# (pool for these rungs: M1, M3, M4, M5). So W8A8/W4A4/W3A3 in the paper are
+# unchanged, and only the two rungs below them use the corrected quantizer --
+# state that in the caption.
+#
+# Budget: 50 epochs per rung, matching the baselines' cap. Warmup is scaled
+# from the original schedule (20/150 and 25/200) in the same proportion.
+# ============================================================
+
+experiment:
+  name: "resnet18_cifar100_2bit_fixedact"
+  dataset: "cifar100"
+  output_dir: "./outputs/resnet18_cifar100_fixedact"
+  seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 4
+  data_root: "./data"
+  val_fraction: 0.10
+  val_seed: 42
+  n_folds: 1
+  fold: 0
+
+teacher:
+  arch: "resnet56"
+  pretrained: true
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M1.pth"
+
+# ── Teacher rungs: restored from the original run, never retrained ──────
+stage_m3:
+  name: "M1+M2->M3 (W8A8, ResNet18)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M2.pth"
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M3.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 180
+  lr: 5.0e-4
+  feat_channels: [64, 128, 256, 512]
+
+stage_m4b:
+  name: "M4a->M4b (W4A4)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M4a.pth"
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M4.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  epochs: 150
+  lr: 1.0e-4
+  feat_channels: [64, 128, 256, 512]
+
+stage_m5b:
+  name: "M5a->M5b (W3A3)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M5a.pth"
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M5.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  epochs: 150
+  lr: 8.0e-5
+  feat_channels: [64, 128, 256, 512]
+
+# ── Retrained rungs (unsigned activations) ──────────────────────────────
+stage_m6a:
+  name: "M1+M3+M4+M5->M6a (W3A2)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 50
+  patience: 50
+  min_delta: 0.04
+  lr: 3.0e-5
+  alpha: 0.75
+  beta: 0.6
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 7
+  label_smoothing: 0.04
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [64, 128, 256, 512]
+
+stage_m6b:
+  name: "M6a->M6b (W2A2)"
+  arch: "resnet18"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 50
+  patience: 50
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.65
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 6
+  label_smoothing: 0.03
+  use_rkd: true
+  quant_log_every: 5
+  feat_channels: [64, 128, 256, 512]

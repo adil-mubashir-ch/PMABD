@@ -1,0 +1,49 @@
+# configs/resnet32_cifar100_baselines.yaml
+# ============================================================
+# Baseline reruns (SQAKD / DAQAKD / CMT-KD) on the PMABD ResNet-32 CIFAR-100
+# setup. Consumed by baselines/ only -- run_experiment.py never reads it.
+#
+# Split, augmentation and batch size are copied from the PMABD run's own
+# config (W:\...\training_code_and_configs\configs\resnet32_cifar100_no_saturation.yaml)
+# so the baselines select checkpoints on exactly the same 5k val images and
+# report on the same untouched 10k test set.
+# ============================================================
+
+model:
+  arch: "resnet32"            # chenyaofo hub CifarResNet, same as the ladder
+
+experiment:
+  name: "resnet32_cifar100_baselines"
+  dataset: "cifar100"
+  num_classes: 100
+  output_dir: "W:/01_MS-Thesis/1_WACV_paper_review/code_v5/outputs/resnet32_cifar100_no_saturation"
+  seed: 42
+
+data:
+  batch_size: 256             # PMABD CIFAR ladder's batch size
+  num_workers: 2
+  data_root: "./data"         # CIFAR-100 auto-downloads here on first use
+  val_fraction: 0.10          # must match the ladder: fixes WHICH 5k are val
+  val_seed: 42
+  image_size: 32
+
+baselines:
+  # Where the ResNet-32 W8A8/W4A4 runs were already written (kept so they
+  # are not re-run). The ResNet-18 config writes to cifar100_resnet18.
+  output_root: "baselines/outputs/cifar100"
+
+  # The model PMABD's W8A8 rung was initialised from: FP32 ResNet-32 trained
+  # from scratch on our 45k split (val 72.34 / test 72.17). It is both the
+  # starting point of every baseline and SQAKD/DAQAKD's teacher (SQAKD's own
+  # CIFAR script uses the same-architecture FP32 model as teacher).
+  fp32_checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/code_v5/outputs/resnet32_cifar100_no_saturation/M2.pth"
+
+  # Epochs the PMABD ladder actually spent at each precision (--schedule matched).
+  # W8A8/W4A4 are declared below. W3A3/W2A2 are read from the extended
+  # ladder's run logs (configs/resnet32_cifar100_2bit_ladder.yaml, Task 1 of
+  # run_cifar_suite.py) once those rungs have trained; until then they have
+  # no budget and run_matrix does not plan them. Declared values always win.
+  matched_epochs_from_log: "outputs/resnet32_cifar100_2bit_ladder"
+  matched_epochs:
+    w8a8: 78     # M1+M2->M3, early-stopped at 78/180 (resnet56_32_cifar_log.txt)
+    w4a4: 194    # M4a->M4, 2 saturation cycles, 150+44 (resnet32_cifar100_no_saturation.log)

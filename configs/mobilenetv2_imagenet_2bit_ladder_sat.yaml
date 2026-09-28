@@ -1,0 +1,286 @@
+# configs/mobilenetv2_imagenet_2bit_ladder_sat.yaml
+# ============================================================
+# MobileNetV2 ImageNet — full precision ladder to W2A2
+# VARIANT B: Saturation enabled (max 2 cycles × 120 epochs each)
+#
+# Identical teacher hierarchy and precision ladder as the no-sat variant.
+# Only the saturation-related fields differ from that config; all other
+# fields (arch, feat_channels, bitwidths, etc.) are identical.
+#
+# SATURATION RATIONALE
+#   Multi-cycle saturation (LR restarts) can help at W8A8/W8A4/W4A4
+#   where there is capacity to absorb the perturbation. At W3A3 and
+#   below the gradient noise from tiny quantization grids makes LR
+#   restarts destabilising — patience-based early stopping is safer.
+#   Saturation is therefore ENABLED at M4/M5a/M5b, DISABLED at M6a+.
+#
+# SATURATION PARAMETERS
+#   saturation: true         — enables multi-cycle LR restart
+#   sat_cycles: 2            — max number of restart cycles
+#   sat_epochs_per_cycle: 120 — epochs per cycle (cosine within each)
+#   sat_min_delta: 0.1       — improvement threshold to continue cycles
+#   patience still applies within each cycle as an inner ES guard.
+#
+# WALL-CLOCK ESTIMATE
+#   Saturation stages (M4–M5b) each run up to 2×120 = 240 epochs maximum
+#   (early-stopped if plateau detected after cycle 1). Budget +40–60% vs
+#   the no-sat variant for those three stages.
+# ============================================================
+
+experiment:
+  name: "mobilenetv2_imagenet_2bit_ladder_sat"
+  dataset: "imagenet"            # or "tinyimagenet"
+  num_classes: 1000              # set to 200 for tinyimagenet
+  output_dir: "./outputs/mobilenetv2_imagenet_2bit_ladder_sat"
+  seed: 42
+
+data:
+  batch_size: 128
+  num_workers: 8
+  data_root: "./data/imagenet"
+  val_fraction: 0.0
+  val_seed: 42
+  image_size: 224
+
+teacher:
+  arch: "resnet50"
+  pretrained: true
+  source: "torchvision"
+  checkpoint: "M1.pth"
+
+aux_teachers:
+  - arch: "resnet34"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M2.pth"
+    register_as: "M2"
+  - arch: "resnet18"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M3.pth"
+    register_as: "M3"
+
+# ── Stage M3_kd: MobileNetV2 FP32 student (no saturation — FP32 is stable) ─
+stage_m3_kd:
+  name: "M1+M2+M3->MBv2_FP32 (KD warm-up)"
+  arch: "mobilenet_v2"
+  init_from: "pretrained"
+  checkpoint: "M_fp32.pth"
+  bitwidth_w: 32
+  bitwidth_a: 32
+  epochs: 60
+  patience: 20
+  min_delta: 0.05
+  lr: 5.0e-5
+  alpha: 0.5
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 3
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 20
+  feat_channels: [32, 64, 96, 320]
+  saturation: false
+
+# ── Stage M4: W8A8 — SATURATION ON ───────────────────────────────────────
+stage_m4:
+  name: "M1+M2+M3+FP32->M4 (W8A8)"
+  arch: "mobilenet_v2"
+  init_from: "M_fp32.pth"
+  checkpoint: "M4.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 120                    # per-cycle epoch budget
+  patience: 30
+  min_delta: 0.05
+  lr: 3.0e-4
+  alpha: 0.55
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.001
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 5
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 20
+  feat_channels: [32, 64, 96, 320]
+  saturation: true
+  sat_cycles: 2
+  sat_epochs_per_cycle: 120
+  sat_min_delta: 0.1
+
+# ── Stage M5a: W8A4 — SATURATION ON ──────────────────────────────────────
+stage_m5a:
+  name: "M4->M5a (W8A4)"
+  arch: "mobilenet_v2"
+  init_from: "M4.pth"
+  checkpoint: "M5a.pth"
+  bitwidth_w: 8
+  bitwidth_a: 4
+  epochs: 120
+  patience: 35
+  min_delta: 0.05
+  lr: 1.5e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.5
+  eta_min_factor: 0.01
+  warmup_epochs: 8
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+  saturation: true
+  sat_cycles: 2
+  sat_epochs_per_cycle: 120
+  sat_min_delta: 0.1
+
+# ── Stage M5b: W4A4 — SATURATION ON ──────────────────────────────────────
+stage_m5b:
+  name: "M5a->M5b (W4A4)"
+  arch: "mobilenet_v2"
+  init_from: "M5a.pth"
+  checkpoint: "M5.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  epochs: 120
+  patience: 40
+  min_delta: 0.05
+  lr: 1.0e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.4
+  eta_min_factor: 0.02
+  warmup_epochs: 15
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+  saturation: true
+  sat_cycles: 2
+  sat_epochs_per_cycle: 120
+  sat_min_delta: 0.08
+
+# ── Stage M6a: W4A3 — SATURATION OFF (too noisy at sub-4-bit) ────────────
+stage_m6a:
+  name: "M5b->M6a (W4A3)"
+  arch: "mobilenet_v2"
+  init_from: "M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 4
+  bitwidth_a: 3
+  epochs: 120
+  patience: 40
+  min_delta: 0.05
+  lr: 6.0e-5
+  alpha: 0.7
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.01
+  warmup_epochs: 10
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+  saturation: false
+
+# ── Stage M6b: W3A3 — SATURATION OFF ─────────────────────────────────────
+stage_m6b:
+  name: "M6a->M6b (W3A3)"
+  arch: "mobilenet_v2"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  epochs: 150
+  patience: 45
+  min_delta: 0.05
+  lr: 8.0e-5
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.5
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.02
+  warmup_epochs: 15
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+  saturation: false
+
+# ── Stage M7a: W3A2 — SATURATION OFF ─────────────────────────────────────
+stage_m7a:
+  name: "M6b->M7a (W3A2)"
+  arch: "mobilenet_v2"
+  init_from: "M6.pth"
+  checkpoint: "M7a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 150
+  patience: 50
+  min_delta: 0.04
+  lr: 3.0e-5
+  alpha: 0.75
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 20
+  label_smoothing: 0.04
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+  saturation: false
+
+# ── Stage M7b: W2A2 — SATURATION OFF ─────────────────────────────────────
+stage_m7b:
+  name: "M7a->M7b (W2A2)"
+  arch: "mobilenet_v2"
+  init_from: "M7a.pth"
+  checkpoint: "M7.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 200
+  patience: 60
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 25
+  label_smoothing: 0.03
+  use_rkd: false
+  quant_log_every: 5
+  feat_channels: [32, 64, 96, 320]
+  saturation: false

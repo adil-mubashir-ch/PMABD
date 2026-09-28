@@ -1,0 +1,316 @@
+# configs/mobilenetv2_imagenet_2bit_ladder.yaml
+# ============================================================
+# MobileNetV2 ImageNet — full precision ladder to W2A2
+# VARIANT A: No saturation (single-pass cosine + patience ES)
+#
+# TEACHER HIERARCHY
+#   M1 : ResNet56  — loaded from chenyaofo/pytorch-cifar-models
+#         NOTE: ResNet56 is a CIFAR architecture (56 layers, 16/32/64 ch).
+#         For ImageNet we instead use ResNet50 as the strong teacher.
+#         See ARCHITECTURE NOTE below.
+#   M2 : ResNet34  — torchvision pretrained ImageNet weights (provided)
+#   M3 : ResNet18  — torchvision pretrained ImageNet weights (provided)
+#         M2 and M3 together give the student a capacity bridge:
+#         ResNet34 is closer to MobileNetV2 than ResNet50, and ResNet18
+#         provides fine-grained soft targets at a similar compute level.
+#   M4 onwards: MobileNetV2 students, progressively quantized.
+#
+# PRECISION LADDER
+#   M3_kd : MobileNetV2 FP32 student  — KD from M1+M2+M3 teachers
+#            (this is the "M2-equivalent" in the original CIFAR config;
+#             it produces the FP32 student that subsequent QAT stages
+#             initialise from. Saved as M_fp32.pth.)
+#   M4    : W8A8  — QAT entry point
+#   M5a   : W8A4  — halve activation bits
+#   M5b   : W4A4  — halve weight bits (final 4-bit model)
+#   M6a   : W4A3  — push activations to 3-bit first
+#   M6b   : W3A3  — halve weight bits (final 3-bit model)
+#   M7a   : W3A2  — push activations to 2-bit, W3 acts as buffer
+#   M7b   : W2A2  — final 2-bit model
+#
+# ARCHITECTURE NOTE
+#   MobileNetV2 uses inverted residuals with depthwise separable convs.
+#   LSQ quantizes each depthwise and pointwise conv separately.
+#   The first Conv2d (stride-2, 3→32) and the final classifier Linear
+#   are held at W8A8 minimum regardless of stage bitwidth (standard
+#   practice for MobileNet-family quantization).
+#   The penultimate pointwise conv is held at W4A4 when interior < 3-bit.
+#
+#   Channel widths: MobileNetV2 standard (32, 16, 24, 32, 64, 96, 160,
+#   320, 1280). Feature distillation taps the four bottleneck-group
+#   outputs: [32, 64, 96, 320] (pre-classifier).
+#   ResNet50 teacher channels tapped at layer outputs: [256,512,1024,2048].
+#   ResNet34/18 tapped at: [64,128,256,512]. All mismatches handled by
+#   learned 1x1 projection heads (feature_strategy: "projected").
+#
+# NO SATURATION VARIANT
+#   All stages are single-pass with cosine LR and patience-based ES.
+#   See mobilenetv2_imagenet_2bit_ladder_sat.yaml for the saturation
+#   variant (max 2 cycles, 120 epochs each).
+#
+# CHECKPOINTS
+#   Place in output_dir before running:
+#     M1.pth  — ResNet50  ImageNet pretrained  (auto-downloaded if absent)
+#     M2.pth  — ResNet34  ImageNet pretrained  (auto-downloaded if absent)
+#     M3.pth  — ResNet18  ImageNet pretrained  (auto-downloaded if absent)
+#   run_experiment.py will attempt torchvision.models download for these
+#   if the .pth files are not present.
+#
+# DATASET
+#   ImageNet (ILSVRC 2012). Set data_root to the directory containing
+#   train/ and val/ subdirectories. TinyImageNet override available via
+#   dataset: "tinyimagenet" (200 classes, 64x64, auto-adapts num_classes).
+#
+# WALL-CLOCK ESTIMATE (see README for full breakdown)
+#   RTX 3070 Ti (8 GB): ~60–80 h total (all 7 QAT stages)
+#   RTX 3090 / 4090   : ~30–40 h total
+#   A100 (40 GB)       : ~14–20 h total
+# ============================================================
+
+experiment:
+  name: "mobilenetv2_imagenet_2bit_ladder_nosat"
+  dataset: "imagenet"            # or "tinyimagenet"
+  num_classes: 1000              # set to 200 for tinyimagenet
+  output_dir: "./outputs/mobilenetv2_imagenet_2bit_ladder_nosat"
+  seed: 42
+
+data:
+  batch_size: 128                # ImageNet needs more GPU memory; 256 OOM on 8 GB
+  num_workers: 8                 # increase on machines with many cores
+  data_root: "./data/imagenet"   # must contain train/ and val/
+  val_fraction: 0.0              # use official ImageNet val split; no carved-out val
+  val_seed: 42
+  image_size: 224                # standard ImageNet; 64 for tinyimagenet
+
+# ── Teacher pool ────────────────────────────────────────────────────────
+# M1: ResNet50 pretrained on ImageNet (strong teacher)
+teacher:
+  arch: "resnet50"
+  pretrained: true
+  source: "torchvision"          # loaded via torchvision.models.resnet50(weights=...)
+  checkpoint: "M1.pth"          # saved here on first run; reloaded thereafter
+
+# ── Auxiliary teachers (loaded into pool at relevant stages) ─────────────
+aux_teachers:
+  - arch: "resnet34"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M2.pth"
+    register_as: "M2"
+  - arch: "resnet18"
+    pretrained: true
+    source: "torchvision"
+    checkpoint: "M3.pth"
+    register_as: "M3"
+
+# ── Stage M3_kd: MobileNetV2 FP32 student (KD warm-up) ─────────────────
+# This replaces the "M2 training" stage from the CIFAR config.
+# MobileNetV2 pretrained weights are used as init; KD from M1+M2+M3 pool
+# fine-tunes for CIFAR→ImageNet domain adaptation and label smoothing.
+# Saved as M_fp32.pth — all downstream QAT stages init from this.
+stage_m3_kd:
+  name: "M1+M2+M3->MBv2_FP32 (KD warm-up)"
+  arch: "mobilenet_v2"
+  init_from: "pretrained"        # torchvision MobileNetV2 ImageNet weights
+  checkpoint: "M_fp32.pth"
+  bitwidth_w: 32                 # FP32 — no quantization
+  bitwidth_a: 32
+  epochs: 60
+  patience: 20
+  min_delta: 0.05
+  lr: 5.0e-5                     # low LR — pretrained weights are already good
+  alpha: 0.5
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 3
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 20
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M4: W8A8 ───────────────────────────────────────────────────────
+stage_m4:
+  name: "M1+M2+M3+FP32->M4 (W8A8)"
+  arch: "mobilenet_v2"
+  init_from: "M_fp32.pth"
+  checkpoint: "M4.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 150
+  patience: 30
+  min_delta: 0.05
+  lr: 3.0e-4
+  alpha: 0.55
+  beta: 0.0
+  temperature: 4.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.001
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 5
+  label_smoothing: 0.1
+  use_rkd: false
+  quant_log_every: 20
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M5a: W8A4 ──────────────────────────────────────────────────────
+stage_m5a:
+  name: "M4->M5a (W8A4)"
+  arch: "mobilenet_v2"
+  init_from: "M4.pth"
+  checkpoint: "M5a.pth"
+  bitwidth_w: 8
+  bitwidth_a: 4
+  epochs: 100
+  patience: 35
+  min_delta: 0.05
+  lr: 1.5e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.5
+  eta_min_factor: 0.01
+  warmup_epochs: 8
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M5b: W4A4 (final 4-bit model) ──────────────────────────────────
+stage_m5b:
+  name: "M5a->M5b (W4A4)"
+  arch: "mobilenet_v2"
+  init_from: "M5a.pth"
+  checkpoint: "M5.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  epochs: 150
+  patience: 40
+  min_delta: 0.05
+  lr: 1.0e-4
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.4
+  eta_min_factor: 0.02
+  warmup_epochs: 15
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M6a: W4A3 ──────────────────────────────────────────────────────
+stage_m6a:
+  name: "M5b->M6a (W4A3)"
+  arch: "mobilenet_v2"
+  init_from: "M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 4
+  bitwidth_a: 3
+  epochs: 120
+  patience: 40
+  min_delta: 0.05
+  lr: 6.0e-5
+  alpha: 0.7
+  beta: 0.0
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.01
+  warmup_epochs: 10
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M6b: W3A3 (final 3-bit model) ──────────────────────────────────
+stage_m6b:
+  name: "M6a->M6b (W3A3)"
+  arch: "mobilenet_v2"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  epochs: 150
+  patience: 45
+  min_delta: 0.05
+  lr: 8.0e-5
+  alpha: 0.65
+  beta: 0.0
+  temperature: 5.5
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.02
+  warmup_epochs: 15
+  label_smoothing: 0.05
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M7a: W3A2 ──────────────────────────────────────────────────────
+stage_m7a:
+  name: "M6b->M7a (W3A2)"
+  arch: "mobilenet_v2"
+  init_from: "M6.pth"
+  checkpoint: "M7a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 150
+  patience: 50
+  min_delta: 0.04
+  lr: 3.0e-5
+  alpha: 0.75
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 20
+  label_smoothing: 0.04
+  use_rkd: false
+  quant_log_every: 10
+  feat_channels: [32, 64, 96, 320]
+
+# ── Stage M7b: W2A2 (final 2-bit model) ──────────────────────────────────
+stage_m7b:
+  name: "M7a->M7b (W2A2)"
+  arch: "mobilenet_v2"
+  init_from: "M7a.pth"
+  checkpoint: "M7.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 200
+  patience: 60
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.0
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "none"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 25
+  label_smoothing: 0.03
+  use_rkd: false
+  quant_log_every: 5
+  feat_channels: [32, 64, 96, 320]

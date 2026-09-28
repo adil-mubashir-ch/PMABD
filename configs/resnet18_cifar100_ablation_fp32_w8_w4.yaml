@@ -1,0 +1,74 @@
+# configs/resnet18_cifar100_ablation_fp32_w8_w4.yaml
+# ============================================================
+# Teacher-pool ablation cell C: FP32 + W8A8 + W4A4 -> W2A2.
+#
+# Teachers: M1 + M3 + M4. Warm start: M4 (lowest-precision teacher).
+# Regime matches fixedact W2A2 (50 epochs, --unsigned-act).
+# ============================================================
+
+experiment:
+  name: "resnet18_cifar100_ablation_fp32_w8_w4"
+  dataset: "cifar100"
+  output_dir: "./outputs/resnet18_cifar100_ablation/fp32_w8_w4"
+  seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 4
+  data_root: "./data"
+  val_fraction: 0.10
+  val_seed: 42
+  n_folds: 1
+  fold: 0
+
+teacher:
+  arch: "resnet56"
+  pretrained: true
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M1.pth"
+
+stage_m3:
+  name: "M1+M2->M3 (W8A8, restore)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M2.pth"
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M3.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 180
+  lr: 5.0e-4
+  feat_channels: [64, 128, 256, 512]
+
+stage_m4b:
+  name: "M4a->M4b (W4A4, restore)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M4a.pth"
+  checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M4.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  epochs: 150
+  lr: 1.0e-4
+  feat_channels: [64, 128, 256, 512]
+
+stage_m6b:
+  name: "M1+M3+M4->M6b (W2A2, abl-fp32+w8+w4)"
+  arch: "resnet18"
+  init_from: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M4.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 50
+  patience: 50
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.65
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 6
+  label_smoothing: 0.03
+  use_rkd: true
+  quant_log_every: 5
+  feat_channels: [64, 128, 256, 512]

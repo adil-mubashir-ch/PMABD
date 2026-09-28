@@ -1,0 +1,56 @@
+# ── Datasets ───────────────────────────────────────────────
+data/
+*.zip
+*.tar
+*.tar.gz
+
+# ── Training artefacts: checkpoints, caches, run outputs ───
+outputs/
+baselines/outputs/
+baselines/outputs_*/
+*.pth
+*.pt
+*.ckpt
+*.npy
+*.npz
+
+# ── Logs and generated results ─────────────────────────────
+logs/
+*.log
+results/
+runs/
+wandb/
+
+# ── Baseline third-party clones (provenance only, see baselines/README.md)
+baselines/third_party/
+
+# ── Environment / secrets ──────────────────────────────────
+.env
+.env.*
+*.env
+.venv/
+venv/
+env/
+.conda/
+*.pem
+*.key
+.netrc
+
+# ── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ── Editors / OS / local tooling ───────────────────────────
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+Desktop.ini
+.DS_Store
+~$*
+
+# ── Local scratch ──────────────────────────────────────────
+command.txt
+_tin2in.json

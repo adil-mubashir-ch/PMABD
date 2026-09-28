@@ -1,0 +1,139 @@
+# configs/resnet20_cifar10.yaml
+# ============================================================
+# ResNet20 CIFAR-10 — single train/val/test split (no K-Fold)
+# Derived from resnet32_cifar100.yaml; only dataset/arch/paths changed.
+#
+#   - val: 10% stratified split carved from the 50k train set
+#   - test: full, untouched 10k official test set
+#   - M2 trains FROM SCRATCH using the hub's own original recipe
+#     (SGD + Nesterov, lr=0.1, wd=5e-4, cosine, no warmup, no KD).
+#   - M3, M4a, M4b are standard KD/QAT stages, init'd from M2's checkpoint
+#     (never from hub-pretrained weights, since that would leak val data).
+#   - patience-based early stopping every stage
+#   - M4a / M4b use multi-cycle saturation training
+#   - ResNet20 and ResNet56 share ResNet32's stage widths (16/32/64),
+#     so feat_channels is unchanged.
+# ============================================================
+
+experiment:
+  name: "resnet20_cifar10"
+  dataset: "cifar10"
+  output_dir: "./outputs/resnet20_cifar10"
+  seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 4
+  data_root: "./data"
+  val_fraction: 0.10   # 10% of the 50k train set -> ~5k val, ~45k train_eff
+  val_seed: 42
+  n_folds: 1            # single split, no K-Fold
+  fold: 0
+
+teacher:
+  arch: "resnet56"      # hub: cifar10_resnet56
+  pretrained: true      # OK for teacher — frozen, never val-selected
+  checkpoint: "M1.pth"
+
+# ── Stage M2: FP32 ResNet20 — FROM-SCRATCH BASELINE ──────────
+# baseline: true bypasses the KD machinery entirely.
+stage_m2:
+  name: "M2 (FP32, ResNet20, from-scratch baseline)"
+  arch: "resnet20"
+  checkpoint: "M2.pth"
+  baseline: true
+  epochs: 200
+  patience: 30
+  min_delta: 0.05
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  nesterov: true
+  eta_min: 0.0
+  label_smoothing: 0.0
+
+# ── Stage M3: W8A8 ResNet20 ──────────────────────────────────
+stage_m3:
+  name: "M1+M2->M3 (W8A8, ResNet20)"
+  arch: "resnet20"
+  init_from: "M2.pth"
+  checkpoint: "M3.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 180
+  patience: 30
+  min_delta: 0.05
+  lr: 5.0e-4
+  alpha: 0.55
+  beta: 0.3
+  temperature: 4.0
+  weighting_strategy: "accuracy"
+  feature_strategy: "projected"
+  lambda_qat: 0.001
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 5
+  label_smoothing: 0.1
+  use_rkd: true
+  quant_log_every: 20
+  feat_channels: [16, 32, 64]
+
+# ── Stage M4a: W8A4 — multi-cycle saturation ─────────────────
+stage_m4a:
+  name: "M1+M2+M3->M4a (W8A4, saturating)"
+  arch: "resnet20"
+  init_from: "M3.pth"
+  checkpoint: "M4a.pth"
+  bitwidth_w: 8
+  bitwidth_a: 4
+  saturating: true
+  epochs_per_cycle: 60
+  max_cycles: 3
+  cycle_min_delta: 0.10
+  cycle_lr_decay: 0.6
+  patience: 45
+  min_delta: 0.05
+  lr: 3.0e-5
+  alpha: 0.7
+  beta: 0.3
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.3
+  eta_min_factor: 0.01
+  warmup_epochs: 8
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+# ── Stage M4b: W4A4 final — multi-cycle saturation ───────────
+stage_m4b:
+  name: "M4a->M4 (W4A4 final, saturating)"
+  arch: "resnet20"
+  init_from: "M4a.pth"
+  checkpoint: "M4.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  saturating: true
+  epochs_per_cycle: 80
+  max_cycles: 3
+  cycle_min_delta: 0.10
+  cycle_lr_decay: 0.6
+  patience: 50
+  min_delta: 0.05
+  lr: 5.0e-5
+  alpha: 0.65
+  beta: 0.3
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.4
+  eta_min_factor: 0.02
+  warmup_epochs: 10
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]

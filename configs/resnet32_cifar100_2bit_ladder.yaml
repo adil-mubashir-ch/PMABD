@@ -1,0 +1,229 @@
+# configs/resnet32_cifar100_2bit_ladder.yaml
+# ============================================================
+# PMABD ResNet-32 / CIFAR-100 ladder, extended from W4A4 down to W2A2.
+# Run by run_cifar_suite.py (Task 1) with the ResNet-18 ladder's runner,
+# W:\01_MS-Thesis\1_WACV_paper_review\RESNET18\run_experiment.py, whose
+# pipeline.py is byte-identical to the code_v5 one that trained M3/M4a/M4.
+#
+# M1..M4 ARE NOT RETRAINED. run_cifar_suite.py copies them into output_dir
+# from the run behind the Table 1 numbers,
+#   W:\01_MS-Thesis\1_WACV_paper_review\code_v5\outputs\resnet32_cifar100_no_saturation
+#   (M2 FP32 72.17 | M3 W8A8 72.14 | M4a W8A4 70.65 | M4 W4A4 71.22),
+# and the runner loads any stage whose checkpoint already exists instead of
+# training it. The stage_m3/m4a/m4b entries are here so those models are
+# registered in the teacher pool; their settings reproduce how they were
+# trained (from run_20260623_005908.log).
+#
+# NEW RUNGS (stage_m5a..m6b) copy the ResNet-18 2-bit ladder's settings
+# (resnet18_cifar100_2bit_ladder.yaml) with feat_channels set to ResNet-32's
+# [16, 32, 64]. They were tuned on ResNet-18 and are not re-tuned here.
+# No saturation: single pass + patience early stopping, as for ResNet-18.
+#
+# Teacher pools (fixed by the runner):
+#   W4A3, W3A3 <- M1 (ResNet-56), M2 (FP32), M3 (W8A8), M4 (W4A4)
+#   W3A2, W2A2 <- M1, M3, M4, M5 (W3A3)
+# The pipeline holds the first conv and fc at W8A8, and at W2A2 also the
+# penultimate layer at W4A4.
+# ============================================================
+
+experiment:
+  name: "resnet32_cifar100_2bit_ladder"
+  dataset: "cifar100"
+  output_dir: "./outputs/resnet32_cifar100_2bit_ladder"
+  seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 4
+  data_root: "./data"
+  val_fraction: 0.10
+  val_seed: 42
+  n_folds: 1
+  fold: 0
+
+teacher:
+  arch: "resnet56"
+  pretrained: true
+  checkpoint: "M1.pth"
+
+# ── Existing rungs (loaded from checkpoint, not retrained) ──────────────
+stage_m3:
+  name: "M1+M2->M3 (W8A8, ResNet32)"
+  arch: "resnet32"
+  init_from: "M2.pth"
+  checkpoint: "M3.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  epochs: 180
+  patience: 30
+  min_delta: 0.05
+  lr: 5.0e-4
+  alpha: 0.55
+  beta: 0.3
+  temperature: 4.0
+  weighting_strategy: "accuracy"
+  feature_strategy: "projected"
+  lambda_qat: 0.001
+  grad_clip: 1.0
+  eta_min_factor: 0.01
+  warmup_epochs: 5
+  label_smoothing: 0.1
+  use_rkd: true
+  quant_log_every: 20
+  feat_channels: [16, 32, 64]
+
+stage_m4a:
+  name: "M1+M2+M3->M4a (W8A4, saturating)"
+  arch: "resnet32"
+  init_from: "M3.pth"
+  checkpoint: "M4a.pth"
+  bitwidth_w: 8
+  bitwidth_a: 4
+  saturating: false
+  epochs: 100
+  patience: 35
+  min_delta: 0.05
+  lr: 3.0e-5
+  alpha: 0.7
+  beta: 0.3
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.3
+  eta_min_factor: 0.01
+  warmup_epochs: 8
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+stage_m4b:
+  name: "M4a->M4 (W4A4 final, saturating)"
+  arch: "resnet32"
+  init_from: "M4a.pth"
+  checkpoint: "M4.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  saturating: true
+  epochs_per_cycle: 150
+  max_cycles: 6
+  cycle_min_delta: 0.10
+  cycle_lr_decay: 0.6
+  patience: 40
+  min_delta: 0.05
+  lr: 5.0e-5
+  alpha: 0.65
+  beta: 0.3
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.4
+  eta_min_factor: 0.02
+  warmup_epochs: 10
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+# ── New rungs ───────────────────────────────────────────────────────────
+stage_m5a:
+  name: "M1+M2+M3+M4->M5a (W4A3)"
+  arch: "resnet32"
+  init_from: "M4.pth"
+  checkpoint: "M5a.pth"
+  bitwidth_w: 4
+  bitwidth_a: 3
+  epochs: 120
+  patience: 40
+  min_delta: 0.05
+  lr: 5.0e-5
+  alpha: 0.7
+  beta: 0.5
+  temperature: 5.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.3
+  eta_min_factor: 0.01
+  warmup_epochs: 10
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+stage_m5b:
+  name: "M5a->M5b (W3A3)"
+  arch: "resnet32"
+  init_from: "M5a.pth"
+  checkpoint: "M5.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  epochs: 150
+  patience: 45
+  min_delta: 0.05
+  lr: 8.0e-5
+  alpha: 0.65
+  beta: 0.55
+  temperature: 5.5
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.35
+  eta_min_factor: 0.02
+  warmup_epochs: 15
+  label_smoothing: 0.05
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+stage_m6a:
+  name: "M1+M3+M4+M5->M6a (W3A2)"
+  arch: "resnet32"
+  init_from: "M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 150
+  patience: 50
+  min_delta: 0.04
+  lr: 3.0e-5
+  alpha: 0.75
+  beta: 0.6
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 20
+  label_smoothing: 0.04
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+stage_m6b:
+  name: "M6a->M6b (W2A2)"
+  arch: "resnet32"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 200
+  patience: 60
+  min_delta: 0.03
+  lr: 2.0e-5
+  alpha: 0.8
+  beta: 0.65
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 25
+  label_smoothing: 0.03
+  use_rkd: true
+  quant_log_every: 5
+  feat_channels: [16, 32, 64]

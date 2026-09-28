@@ -1,0 +1,48 @@
+# configs/resnet18_cifar100_baselines.yaml
+# ============================================================
+# Baseline reruns (SQAKD / DAQAKD / CMT-KD) on the PMABD ResNet-18 CIFAR-100
+# setup -- paper Table 2. Consumed by baselines/ only.
+#
+# Split, batch size and architecture are copied from the PMABD run
+# (W:\01_MS-Thesis\1_WACV_paper_review\RESNET18\configs\resnet18_cifar100_2bit_ladder.yaml):
+# torchvision ResNet-18 with the CIFAR stem (3x3/s1 conv1, maxpool removed),
+# built here by pipeline_imagenet_patch.load_model_imagenet(small_input=True),
+# which produces the identical module tree.
+# ============================================================
+
+model:
+  arch: "resnet18"
+
+experiment:
+  name: "resnet18_cifar100_baselines"
+  dataset: "cifar100"
+  num_classes: 100
+  output_dir: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder"
+  seed: 42
+
+data:
+  batch_size: 256             # PMABD ResNet-18 ladder's batch size
+  num_workers: 2
+  data_root: "./data"         # CIFAR-100 already present in the repo
+  val_fraction: 0.10
+  val_seed: 42
+  image_size: 32              # <= 64 -> CIFAR stem
+
+baselines:
+  # Separate from ResNet-32's baselines/outputs/cifar100: the stage ids are
+  # the same (sqakd_w4a4, ...), so a shared folder would skip these runs.
+  output_root: "baselines/outputs/cifar100_resnet18"
+
+  # FP32 ResNet-18 trained from scratch on our 45k split (resnet18_logs.txt:
+  # best val 77.96 / test 78.08). PMABD's W8A8 rung was initialised from it,
+  # so it is every baseline's start and SQAKD/DAQAKD's teacher.
+  fp32_checkpoint: "W:/01_MS-Thesis/1_WACV_paper_review/RESNET18/outputs/resnet18_cifar100_2bit_ladder/M2.pth"
+
+  # Epochs the PMABD ladder ran at each compared precision
+  # (run_20260626_154756.log, all single-pass with patience early stopping).
+  # Baselines are compared at W8A8 / W4A4 / W2A2 only; W3A3 (74 epochs) is a
+  # PMABD rung but has no baseline column, so it is left out here.
+  matched_epochs:
+    w8a8: 145    # M1+M2->M3, early-stopped at 145/180
+    w4a4: 85     # M4a->M4b, early-stopped at 85/150
+    w2a2: 154    # M6a->M6b, early-stopped at 154/200

@@ -1,0 +1,123 @@
+# configs/resnet32_cifar100_2bit_fixedlr.yaml
+# ============================================================
+# PMABD ResNet-32 W3A2 + W2A2 rungs, retrained at 10x the learning rate.
+#   python cifar_ladder.py --unsigned-act --config configs/resnet32_cifar100_2bit_fixedlr.yaml
+#
+# WHY
+#   The first extension (resnet32_cifar100_2bit_ladder.yaml, 50 epochs/rung)
+#   copied these rungs' learning rates from the ResNet-18 ladder: 3e-5 (W3A2)
+#   and 2e-5 (W2A2). They suit ResNet-18, whose W2A2 rung started at 74.9% and
+#   only needed a nudge. ResNet-32 fell to 37.5% after one W2A2 epoch and was
+#   still climbing when the learning rate reached zero, ending at 61.16 against
+#   the baselines' ~65.5 (which train at 5e-4). So only the learning rate
+#   changes here: 3e-4 and 2e-4. Everything else is the first extension's.
+#
+# NOT RETRAINED: M1..M5, restored from outputs/resnet32_cifar100_2bit_ladder as
+# teachers (pool for these rungs: M1, M3, M4, M5). M3 and M4 were trained with
+# the signed activation quantizer; M5 (W3A3) with the unsigned one, so its
+# stage carries unsigned_act: true to be restored that way. The parent of W3A2
+# is that same M5 (70.24).
+# ============================================================
+
+experiment:
+  name: "resnet32_cifar100_2bit_fixedlr"
+  dataset: "cifar100"
+  output_dir: "./outputs/resnet32_cifar100_fixedlr"
+  seed: 42
+
+data:
+  batch_size: 256
+  num_workers: 4
+  data_root: "./data"
+  val_fraction: 0.10
+  val_seed: 42
+  n_folds: 1
+  fold: 0
+
+teacher:
+  arch: "resnet56"
+  pretrained: true
+  checkpoint: "./outputs/resnet32_cifar100_2bit_ladder/M1.pth"
+
+# ── Teacher rungs: restored, never retrained ────────────────────────────
+stage_m3:
+  name: "M1+M2->M3 (W8A8, ResNet32)"
+  arch: "resnet32"
+  init_from: "./outputs/resnet32_cifar100_2bit_ladder/M2.pth"
+  checkpoint: "./outputs/resnet32_cifar100_2bit_ladder/M3.pth"
+  bitwidth_w: 8
+  bitwidth_a: 8
+  lr: 5.0e-4
+  feat_channels: [16, 32, 64]
+
+stage_m4b:
+  name: "M4a->M4 (W4A4 final, saturating)"
+  arch: "resnet32"
+  init_from: "./outputs/resnet32_cifar100_2bit_ladder/M4a.pth"
+  checkpoint: "./outputs/resnet32_cifar100_2bit_ladder/M4.pth"
+  bitwidth_w: 4
+  bitwidth_a: 4
+  lr: 5.0e-5
+  feat_channels: [16, 32, 64]
+
+stage_m5b:
+  name: "M5a->M5b (W3A3)"
+  arch: "resnet32"
+  init_from: "./outputs/resnet32_cifar100_2bit_ladder/M5a.pth"
+  checkpoint: "./outputs/resnet32_cifar100_2bit_ladder/M5.pth"
+  bitwidth_w: 3
+  bitwidth_a: 3
+  unsigned_act: true
+  lr: 8.0e-5
+  feat_channels: [16, 32, 64]
+
+# ── Retrained rungs: 10x learning rate ──────────────────────────────────
+stage_m6a:
+  name: "M1+M3+M4+M5->M6a (W3A2)"
+  arch: "resnet32"
+  init_from: "./outputs/resnet32_cifar100_2bit_ladder/M5.pth"
+  checkpoint: "M6a.pth"
+  bitwidth_w: 3
+  bitwidth_a: 2
+  epochs: 50
+  patience: 50
+  min_delta: 0.04
+  lr: 3.0e-4
+  alpha: 0.75
+  beta: 0.6
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.25
+  eta_min_factor: 0.02
+  warmup_epochs: 7
+  label_smoothing: 0.04
+  use_rkd: true
+  quant_log_every: 10
+  feat_channels: [16, 32, 64]
+
+stage_m6b:
+  name: "M6a->M6b (W2A2)"
+  arch: "resnet32"
+  init_from: "M6a.pth"
+  checkpoint: "M6.pth"
+  bitwidth_w: 2
+  bitwidth_a: 2
+  epochs: 50
+  patience: 50
+  min_delta: 0.03
+  lr: 2.0e-4
+  alpha: 0.8
+  beta: 0.65
+  temperature: 6.0
+  weighting_strategy: "entropy"
+  feature_strategy: "projected"
+  lambda_qat: 0.0
+  grad_clip: 0.2
+  eta_min_factor: 0.02
+  warmup_epochs: 6
+  label_smoothing: 0.03
+  use_rkd: true
+  quant_log_every: 5
+  feat_channels: [16, 32, 64]
